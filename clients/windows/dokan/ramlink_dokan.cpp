@@ -1,0 +1,435 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <dokan.h>
+
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <vector>
+#include <algorithm>
+
+#pragma comment(lib, "Ws2_32.lib")
+
+static const uint8_t OP_INFO = 1;
+static const uint8_t OP_READ = 2;
+static const uint8_t OP_WRITE = 3;
+static const uint32_t MAX_BLOCK = 1024 * 1024;
+static const uint32_t SECTOR_SIZE = 512;
+
+#pragma pack(push, 1)
+struct Header {
+    char magic[4];
+    uint8_t op;
+    uint64_t offset_be;
+    uint32_t length_be;
+};
+#pragma pack(pop)
+
+static uint64_t bswap64(uint64_t x) {
+    return ((x & 0x00000000000000FFULL) << 56) |
+           ((x & 0x000000000000FF00ULL) << 40) |
+           ((x & 0x0000000000FF0000ULL) << 24) |
+           ((x & 0x00000000FF000000ULL) << 8) |
+           ((x & 0x000000FF00000000ULL) >> 8) |
+           ((x & 0x0000FF0000000000ULL) >> 24) |
+           ((x & 0x00FF000000000000ULL) >> 40) |
+           ((x & 0xFF00000000000000ULL) >> 56);
+}
+static uint64_t hton64(uint64_t x) {
+    const uint16_t one = 1;
+    return (*(const uint8_t*)&one) ? bswap64(x) : x;
+}
+static bool send_all(SOCKET s, const void* data, size_t len) {
+    const char* p = static_cast<const char*>(data);
+    while (len) {
+        int n = send(s, p, static_cast<int>(std::min<size_t>(len, 1024 * 1024)), 0);
+        if (n <= 0) return false;
+        p += n; len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+static bool recv_all(SOCKET s, void* data, size_t len) {
+    char* p = static_cast<char*>(data);
+    while (len) {
+        int n = recv(s, p, static_cast<int>(std::min<size_t>(len, 1024 * 1024)), 0);
+        if (n <= 0) return false;
+        p += n; len -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+class RamLinkClient {
+public:
+    RamLinkClient(const std::string& host, uint16_t port)
+        : host_(host), port_(port), sock_(INVALID_SOCKET), size_(0) {}
+    ~RamLinkClient() { close_socket(); }
+
+    bool connect_server() {
+        std::lock_guard<std::mutex> guard(mu_);
+        return connect_locked();
+    }
+    uint64_t size() const { return size_; }
+
+    bool read(uint64_t offset, void* out, uint32_t length) {
+        std::lock_guard<std::mutex> guard(mu_);
+        return transact_read_locked(offset, out, length);
+    }
+    bool write(uint64_t offset, const void* data, uint32_t length) {
+        std::lock_guard<std::mutex> guard(mu_);
+        return transact_write_locked(offset, data, length);
+    }
+
+private:
+    std::string host_;
+    uint16_t port_;
+    SOCKET sock_;
+    uint64_t size_;
+    mutable std::mutex mu_;
+
+    void close_socket() {
+        if (sock_ != INVALID_SOCKET) {
+            closesocket(sock_);
+            sock_ = INVALID_SOCKET;
+        }
+    }
+    bool connect_locked() {
+        close_socket();
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        addrinfo* result = nullptr;
+        std::string service = std::to_string(port_);
+        if (getaddrinfo(host_.c_str(), service.c_str(), &hints, &result) != 0) return false;
+
+        for (addrinfo* p = result; p; p = p->ai_next) {
+            SOCKET s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+            if (s == INVALID_SOCKET) continue;
+            DWORD timeout = 60000;
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+            if (connect(s, p->ai_addr, static_cast<int>(p->ai_addrlen)) == 0) {
+                sock_ = s;
+                freeaddrinfo(result);
+                return query_info_locked();
+            }
+            closesocket(s);
+        }
+        freeaddrinfo(result);
+        return false;
+    }
+    bool send_header_locked(uint8_t op, uint64_t offset, uint32_t length) {
+        Header h{};
+        std::memcpy(h.magic, "RML1", 4);
+        h.op = op;
+        h.offset_be = hton64(offset);
+        h.length_be = htonl(length);
+        return send_all(sock_, &h, sizeof(h));
+    }
+    bool recv_header_locked(Header& h) {
+        if (!recv_all(sock_, &h, sizeof(h))) return false;
+        return std::memcmp(h.magic, "RML1", 4) == 0;
+    }
+    bool query_info_locked() {
+        if (!send_header_locked(OP_INFO, 0, 0)) return false;
+        Header h{};
+        if (!recv_header_locked(h)) return false;
+        uint32_t n = ntohl(h.length_be);
+        if (n > 64 * 1024) return false;
+        std::vector<char> text(n + 1);
+        if (!recv_all(sock_, text.data(), n)) return false;
+        text[n] = 0;
+        std::string s(text.data());
+        const std::string key = "buffer_bytes=";
+        size_t pos = s.find(key);
+        if (pos == std::string::npos) return false;
+        pos += key.size();
+        size_t end = s.find('\n', pos);
+        try {
+            size_ = std::stoull(s.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
+        } catch (...) {
+            return false;
+        }
+        return size_ >= SECTOR_SIZE;
+    }
+    bool transact_read_locked(uint64_t offset, void* out, uint32_t length) {
+        if (offset > size_ || length > size_ - offset) return false;
+        if (length == 0) return true;
+        if (sock_ == INVALID_SOCKET && !connect_locked()) return false;
+        if (!send_header_locked(OP_READ, offset, length)) return false;
+
+        Header h{};
+        if (!recv_header_locked(h)) return false;
+        uint32_t response = ntohl(h.length_be);
+        if (h.op != OP_READ || response != length) return false;
+        return recv_all(sock_, out, length);
+    }
+    bool transact_write_locked(uint64_t offset, const void* data, uint32_t length) {
+        if (offset > size_ || length > size_ - offset) return false;
+        if (length == 0) return true;
+        if (sock_ == INVALID_SOCKET && !connect_locked()) return false;
+        if (!send_header_locked(OP_WRITE, offset, length)) return false;
+        if (!send_all(sock_, data, length)) return false;
+
+        Header h{};
+        if (!recv_header_locked(h)) return false;
+        return h.op == OP_WRITE && ntohl(h.length_be) == length;
+    }
+};
+
+static RamLinkClient* g_client = nullptr;
+static const wchar_t* RAM_FILE = L"\\RAMLINK.BIN";
+
+static bool is_root(LPCWSTR name) {
+    return name && (wcscmp(name, L"\\") == 0 || wcscmp(name, L"") == 0);
+}
+static bool is_ram_file(LPCWSTR name) {
+    return name && _wcsicmp(name, RAM_FILE) == 0;
+}
+static void fill_file_info(LPBY_HANDLE_FILE_INFORMATION b, uint64_t size, bool directory) {
+    ZeroMemory(b, sizeof(*b));
+    b->dwFileAttributes = directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+    b->nFileSizeHigh = static_cast<DWORD>(size >> 32);
+    b->nFileSizeLow = static_cast<DWORD>(size & 0xFFFFFFFFULL);
+    b->nNumberOfLinks = 1;
+    b->dwVolumeSerialNumber = 0x524D4C31;
+}
+
+static NTSTATUS DOKAN_CALLBACK rl_create(
+    LPCWSTR FileName, PDOKAN_IO_SECURITY_CONTEXT, ACCESS_MASK, ULONG, ULONG,
+    ULONG CreateDisposition, ULONG, PDOKAN_FILE_INFO info) {
+    if (is_root(FileName)) {
+        info->IsDirectory = TRUE;
+        info->Context = 1;
+        return STATUS_SUCCESS;
+    }
+    if (!is_ram_file(FileName)) return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (CreateDisposition == CREATE_NEW || CreateDisposition == CREATE_ALWAYS ||
+        CreateDisposition == TRUNCATE_EXISTING)
+        return STATUS_OBJECT_NAME_COLLISION;
+    info->IsDirectory = FALSE;
+    info->Context = 2;
+    return STATUS_SUCCESS;
+}
+
+static void DOKAN_CALLBACK rl_cleanup(LPCWSTR, PDOKAN_FILE_INFO info) { info->Context = 0; }
+static void DOKAN_CALLBACK rl_close(LPCWSTR, PDOKAN_FILE_INFO info) { info->Context = 0; }
+
+static NTSTATUS DOKAN_CALLBACK rl_read(
+    LPCWSTR FileName, LPVOID Buffer, DWORD BufferLength, LPDWORD ReadLength,
+    LONGLONG Offset, PDOKAN_FILE_INFO) {
+    *ReadLength = 0;
+    if (!is_ram_file(FileName) || Offset < 0 || !g_client)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    uint64_t off = static_cast<uint64_t>(Offset);
+    if (off >= g_client->size()) return STATUS_SUCCESS;
+    uint32_t total = static_cast<uint32_t>(
+        std::min<uint64_t>(BufferLength, g_client->size() - off));
+
+    uint8_t* p = static_cast<uint8_t*>(Buffer);
+    uint32_t done = 0;
+    while (done < total) {
+        uint32_t n = std::min<uint32_t>(MAX_BLOCK, total - done);
+        if (!g_client->read(off + done, p + done, n))
+            return STATUS_DEVICE_NOT_CONNECTED;
+        done += n;
+    }
+    *ReadLength = done;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS DOKAN_CALLBACK rl_write(
+    LPCWSTR FileName, LPCVOID Buffer, DWORD NumberOfBytesToWrite,
+    LPDWORD NumberOfBytesWritten, LONGLONG Offset, PDOKAN_FILE_INFO) {
+    *NumberOfBytesWritten = 0;
+    if (!is_ram_file(FileName) || Offset < 0 || !g_client)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    uint64_t off = static_cast<uint64_t>(Offset);
+    if (off > g_client->size() ||
+        NumberOfBytesToWrite > g_client->size() - off)
+        return STATUS_DISK_FULL;
+
+    const uint8_t* p = static_cast<const uint8_t*>(Buffer);
+    uint32_t done = 0;
+    while (done < NumberOfBytesToWrite) {
+        uint32_t n = std::min<uint32_t>(MAX_BLOCK, NumberOfBytesToWrite - done);
+        if (!g_client->write(off + done, p + done, n))
+            return STATUS_DEVICE_NOT_CONNECTED;
+        done += n;
+    }
+    *NumberOfBytesWritten = done;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS DOKAN_CALLBACK rl_flush(LPCWSTR, PDOKAN_FILE_INFO) {
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS DOKAN_CALLBACK rl_info(
+    LPCWSTR FileName, LPBY_HANDLE_FILE_INFORMATION Buffer, PDOKAN_FILE_INFO) {
+    if (is_root(FileName)) {
+        fill_file_info(Buffer, 0, true);
+        return STATUS_SUCCESS;
+    }
+    if (is_ram_file(FileName) && g_client) {
+        fill_file_info(Buffer, g_client->size(), false);
+        return STATUS_SUCCESS;
+    }
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+static NTSTATUS DOKAN_CALLBACK rl_find(
+    LPCWSTR FileName, PFillFindData FillFindData, PDOKAN_FILE_INFO info) {
+    if (!is_root(FileName)) return STATUS_OBJECT_PATH_NOT_FOUND;
+
+    WIN32_FIND_DATAW f{};
+    wcscpy_s(f.cFileName, L"RAMLINK.BIN");
+    f.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+    uint64_t size = g_client ? g_client->size() : 0;
+    f.nFileSizeHigh = static_cast<DWORD>(size >> 32);
+    f.nFileSizeLow = static_cast<DWORD>(size);
+    return FillFindData(&f, info) == 0 ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
+}
+
+static NTSTATUS DOKAN_CALLBACK rl_setattr(LPCWSTR, DWORD, PDOKAN_FILE_INFO) {
+    return STATUS_SUCCESS;
+}
+static NTSTATUS DOKAN_CALLBACK rl_settime(
+    LPCWSTR, const FILETIME*, const FILETIME*, const FILETIME*, PDOKAN_FILE_INFO) {
+    return STATUS_SUCCESS;
+}
+static NTSTATUS DOKAN_CALLBACK rl_delete_file(LPCWSTR FileName, PDOKAN_FILE_INFO) {
+    return is_ram_file(FileName) ? STATUS_ACCESS_DENIED : STATUS_OBJECT_NAME_NOT_FOUND;
+}
+static NTSTATUS DOKAN_CALLBACK rl_delete_dir(LPCWSTR FileName, PDOKAN_FILE_INFO) {
+    return is_root(FileName) ? STATUS_ACCESS_DENIED : STATUS_OBJECT_NAME_NOT_FOUND;
+}
+static NTSTATUS DOKAN_CALLBACK rl_move(LPCWSTR, LPCWSTR, BOOL, PDOKAN_FILE_INFO) {
+    return STATUS_ACCESS_DENIED;
+}
+static NTSTATUS DOKAN_CALLBACK rl_set_eof(
+    LPCWSTR FileName, LONGLONG ByteOffset, PDOKAN_FILE_INFO) {
+    if (!is_ram_file(FileName) || !g_client) return STATUS_OBJECT_NAME_NOT_FOUND;
+    return ByteOffset == static_cast<LONGLONG>(g_client->size())
+        ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+}
+static NTSTATUS DOKAN_CALLBACK rl_set_alloc(
+    LPCWSTR FileName, LONGLONG AllocSize, PDOKAN_FILE_INFO info) {
+    return rl_set_eof(FileName, AllocSize, info);
+}
+static NTSTATUS DOKAN_CALLBACK rl_disk(
+    PULONGLONG FreeBytesAvailable, PULONGLONG TotalNumberOfBytes,
+    PULONGLONG TotalNumberOfFreeBytes, PDOKAN_FILE_INFO) {
+    uint64_t n = g_client ? g_client->size() : 0;
+    *FreeBytesAvailable = n;
+    *TotalNumberOfBytes = n;
+    *TotalNumberOfFreeBytes = n;
+    return STATUS_SUCCESS;
+}
+static NTSTATUS DOKAN_CALLBACK rl_volume(
+    LPWSTR VolumeNameBuffer, DWORD VolumeNameSize, LPDWORD Serial,
+    LPDWORD MaxComponent, LPDWORD Flags, LPWSTR FsNameBuffer,
+    DWORD FsNameSize, PDOKAN_FILE_INFO) {
+    if (VolumeNameSize)
+        wcsncpy_s(VolumeNameBuffer, VolumeNameSize, L"RAM-Link", _TRUNCATE);
+    if (FsNameSize)
+        wcsncpy_s(FsNameBuffer, FsNameSize, L"RAMLINK", _TRUNCATE);
+    *Serial = 0x524D4C31;
+    *MaxComponent = 255;
+    *Flags = FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK;
+    return STATUS_SUCCESS;
+}
+static NTSTATUS DOKAN_CALLBACK rl_mounted(LPCWSTR MountPoint, PDOKAN_FILE_INFO) {
+    std::wcout << L"Mounted: " << MountPoint << L"\n";
+    return STATUS_SUCCESS;
+}
+static NTSTATUS DOKAN_CALLBACK rl_unmounted(PDOKAN_FILE_INFO) {
+    std::wcout << L"Unmounted\n";
+    return STATUS_SUCCESS;
+}
+
+static DOKAN_OPERATIONS make_ops() {
+    DOKAN_OPERATIONS o{};
+    o.ZwCreateFile = rl_create;
+    o.Cleanup = rl_cleanup;
+    o.CloseFile = rl_close;
+    o.ReadFile = rl_read;
+    o.WriteFile = rl_write;
+    o.FlushFileBuffers = rl_flush;
+    o.GetFileInformation = rl_info;
+    o.FindFiles = rl_find;
+    o.SetFileAttributes = rl_setattr;
+    o.SetFileTime = rl_settime;
+    o.DeleteFile = rl_delete_file;
+    o.DeleteDirectory = rl_delete_dir;
+    o.MoveFile = rl_move;
+    o.SetEndOfFile = rl_set_eof;
+    o.SetAllocationSize = rl_set_alloc;
+    o.GetDiskFreeSpace = rl_disk;
+    o.GetVolumeInformation = rl_volume;
+    o.Mounted = rl_mounted;
+    o.Unmounted = rl_unmounted;
+    return o;
+}
+
+int wmain(int argc, wchar_t* argv[]) {
+    std::string host = "192.168.42.129";
+    wchar_t mount[8] = L"R:\\";
+    if (argc >= 2) {
+        char tmp[256]{};
+        WideCharToMultiByte(CP_UTF8, 0, argv[1], -1, tmp, sizeof(tmp), nullptr, nullptr);
+        host = tmp;
+    }
+    if (argc >= 3) {
+        if (wcslen(argv[2]) == 1) {
+            mount[0] = argv[2][0]; mount[1] = L':'; mount[2] = L'\\'; mount[3] = 0;
+        } else if (wcslen(argv[2]) == 2 && argv[2][1] == L':') {
+            mount[0] = argv[2][0]; mount[1] = L':'; mount[2] = L'\\'; mount[3] = 0;
+        } else {
+            wcscpy_s(mount, argv[2]);
+        }
+    }
+
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::cerr << "WSAStartup failed\n";
+        return 1;
+    }
+
+    RamLinkClient client(host, 8081);
+    g_client = &client;
+    std::cout << "Connecting to RAM-Link server " << host << ":8081...\n";
+    if (!client.connect_server()) {
+        std::cerr << "RAM-Link connection failed. Check USB tethering/IP/server.\n";
+        WSACleanup();
+        return 2;
+    }
+
+    std::cout << "Remote RAM buffer: " << (client.size() / 1024 / 1024) << " MiB\n";
+
+    DOKAN_OPTIONS opt{};
+    opt.Version = DOKAN_VERSION;
+    opt.SingleThread = FALSE;
+    opt.Options = DOKAN_OPTION_MOUNT_MANAGER;
+    opt.MountPoint = mount;
+    opt.Timeout = 60000;
+    opt.AllocationUnitSize = SECTOR_SIZE;
+    opt.SectorSize = SECTOR_SIZE;
+    opt.GlobalContext = reinterpret_cast<ULONG64>(&client);
+
+    DOKAN_OPERATIONS ops = make_ops();
+    DokanInit();
+    int result = DokanMain(&opt, &ops);
+    DokanShutdown();
+
+    g_client = nullptr;
+    WSACleanup();
+    std::cout << "DokanMain result: " << result << "\n";
+    return result == DOKAN_SUCCESS ? 0 : 3;
+}
