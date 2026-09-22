@@ -1,8 +1,8 @@
 # RAM-Link
 
-**Use an Android phone as a USB-connected RAM-backed storage/working-memory layer for a PC.**
+**Use Android phone RAM as remotely accessible working memory for a PC or application.**
 
-RAM-Link is an experimental open-source project exploring **Android RAM over USB**, using an Android device as a high-speed temporary data buffer that can be accessed from Windows, Linux, and macOS.
+RAM-Link is an experimental open-source project exploring **Android RAM over a physical USB connection**. The project is designed around memory operations—not file sharing and not turning phone RAM into a hard drive.
 
 > ⚠️ **Experimental:** RAM-Link is not physical RAM expansion and should not be used for important or irreplaceable data.
 
@@ -15,7 +15,7 @@ RAM-Link explores that idea with:
 - 📱 Android RAM buffer
 - 🔌 USB-connected transport
 - ⚡ TCP-based data streaming
-- 💾 RAM-backed block-device interface
+- 🧠 Remote RAM / working-memory interface
 - 🪟 Windows client
 - 🐧 Linux FUSE/NBD roadmap
 - 🍎 macOS adapter roadmap
@@ -27,9 +27,9 @@ RAM-Link explores that idea with:
 
 Current implementation:
 
-**Android / Termux RAM buffer → TCP :8081 → USB tethering → Windows client**
+**Android RAM → RML1 :18080 → USB/tethering transport → continuous remote-memory service → active cache**
 
-The current milestone includes a **512-byte-sector block-device API in user space**.
+The 512-byte block API is a protocol test interface; the project direction is **RAM access, not storage**.
 
 RAM-Link is currently a prototype—not a native Windows RAM device, not a replacement for physical RAM, and not yet a production-ready storage driver.
 
@@ -73,7 +73,7 @@ python server.py 512
 ip addr
 ```
 
-Find the USB-tethering IP and set `HOST` in the Windows client.
+Find the USB-tethering IP and start the Windows memory service with that address.
 
 ### Windows
 
@@ -113,7 +113,7 @@ A short video demonstration will show the Android phone, USB connection, RAM-Lin
 
 ## Search keywords
 
-**Android RAM over USB · phone RAM for PC · USB RAM · Android memory sharing · RAM over USB · Android PC memory · RAM-backed storage · Android block device · USB memory sharing · Windows virtual storage · Dokan · FUSE · NBD · Kotlin · Android · TCP · ADB**
+**Android RAM over USB · phone RAM for PC · remote RAM · working memory · RAM over USB · Android PC memory · Windows memory interface · Linux memory interface · macOS memory interface · Kotlin · Android · TCP · ADB**
 
 ## Contributing
 
