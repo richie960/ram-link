@@ -172,9 +172,7 @@ class RAMLinkServer:
             lease = self.leases.pop(lease_id, None)
         if lease is None:
             raise ValueError("Unknown lease")
-
         print(f"[RELEASE] id={lease_id}")
-        self.send_header(current_conn[0], OP_RELEASE, lease_id, 0)
 
     def info(self, conn):
         self.cleanup_expired()
