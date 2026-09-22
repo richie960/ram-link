@@ -1,14 +1,1 @@
-# RAM-Link RML1 Protocol
-
-Header: 17 bytes, network order: `!4sBQI`.
-
-- Magic: `RML1`
-- Operation: 1 byte
-- Offset/sector: 8 bytes
-- Length/count: 4 bytes
-
-Operations: INFO=1, READ=2, WRITE=3, PING=4, BLOCK_INFO=5, BLOCK_READ=6, BLOCK_WRITE=7.
-
-Block operations use 512-byte sectors and a maximum transfer of 1 MiB.
-
-The server validates all ranges before accessing the allocated RAM buffer.
+# RAM-Link RML1 Protocol\n\n## Transport\n\nThe current Android implementation runs in Termux and exposes TCP **18080**.\nDuring the current hardware test phase, TCP is normally carried over USB\ntethering or another private USB-connected network.\n\n## Header\n\nEvery request and response begins with a 17-byte network-order header:\n\n`!4sBQI`\n\n- Magic: 4 bytes, `RML1`\n- Operation: 1 byte\n- Offset / lease ID / sector: 8 bytes\n- Length / count: 4 bytes\n\n## Operations\n\n| Code | Name | Meaning |\n|---:|---|---|\n| 1 | INFO | Server and RAM information |\n| 2 | READ | Read raw bytes |\n| 3 | WRITE | Write raw bytes |\n| 4 | PING | Connection health check |\n| 5 | BLOCK_INFO | 512-byte block-device information |\n| 6 | BLOCK_READ | Read sectors |\n| 7 | BLOCK_WRITE | Write sectors |\n| 8 | BORROW | Reserve a RAM block for the client |\n| 9 | RELEASE | Return a borrowed block |\n| 10 | KEEPALIVE | Extend an active lease |\n\n## Borrowed-memory model\n\nA client can request a RAM block with `BORROW`. The server:\n\n1. Finds a non-overlapping free region.\n2. Reserves that region.\n3. Clears it before handing it to the client.\n4. Returns a unique lease ID, byte offset and byte length.\n5. Keeps ownership of the region until `RELEASE` or lease expiry.\n\nThe current lease lifetime is 120 seconds. Clients that need the block\nlonger than that must send `KEEPALIVE`.\n\nThis is important for RAM-Link testing because a memory block is not merely\nallocated for an instant and immediately discarded: the test client can\nhold the same borrowed block, repeatedly use it, verify it and keep the\nlease alive for a sustained period.\n\n## Transfer limits\n\n- Sector size: 512 bytes.\n- Maximum single raw transfer: 1 MiB.\n- Block operations use 512-byte sectors.\n- All server-side ranges are validated before accessing the RAM buffer.\n- The RAM is volatile. Releasing the block makes it available for a future\n  borrower; it is not persistent storage.\n\n## Current validation target\n\nThe sustained-borrow test should demonstrate:\n\n`BORROW -> WRITE -> READ -> VERIFY -> KEEPALIVE -> repeat -> RELEASE`\n\nfor a configurable period. A passing test proves that the same RAM region\nremains allocated, reachable and data-correct while it is actively borrowed.
