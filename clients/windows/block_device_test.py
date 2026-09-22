@@ -6,7 +6,7 @@ import time
 
 from ramlink_client import discover_phone
 
-PORT = 8081
+PORT = 18080
 MAGIC = b"RML1"
 HEADER = struct.Struct("!4sBQI")
 OP_BLOCK_INFO, OP_BLOCK_READ, OP_BLOCK_WRITE = 5, 6, 7
