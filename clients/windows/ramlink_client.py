@@ -8,10 +8,12 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-PORT = 8081
+PORT = 18080
 MAGIC = b"RML1"
 HEADER = struct.Struct("!4sBQI")
 OP_INFO, OP_READ, OP_WRITE, OP_PING = 1, 2, 3, 4
+OP_BLOCK_INFO, OP_BLOCK_READ, OP_BLOCK_WRITE = 5, 6, 7
+OP_BORROW, OP_RELEASE, OP_KEEPALIVE = 8, 9, 10
 MAX_BLOCK = 1024 * 1024
 DISCOVERY_TIMEOUT = 0.20
 DISCOVERY_WORKERS = 64
