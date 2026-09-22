@@ -1,38 +1,130 @@
 # RAM-Link
 
-Experimental Android RAM-over-USB prototype.
+**Use an Android phone as a USB-connected RAM-backed storage/working-memory layer for a PC.**
 
-Current transport: Android Termux RAM buffer -> TCP :8081 -> USB tethering -> Windows client.
+RAM-Link is an experimental open-source project exploring **Android RAM over USB**, using an Android device as a high-speed temporary data buffer that can be accessed from Windows, Linux, and macOS.
 
-The current milestone includes a 512-byte-sector block-device API in user space. It is not yet a native Windows RAM device or physical RAM expansion system.
+> ⚠️ **Experimental:** RAM-Link is not physical RAM expansion and should not be used for important or irreplaceable data.
+
+## Why RAM-Link?
+
+What if an Android phone could provide part of its available memory to a computer over a physical USB connection?
+
+RAM-Link explores that idea with:
+
+- 📱 Android RAM buffer
+- 🔌 USB-connected transport
+- ⚡ TCP-based data streaming
+- 💾 RAM-backed block-device interface
+- 🪟 Windows client
+- 🐧 Linux FUSE/NBD roadmap
+- 🍎 macOS adapter roadmap
+- 🔄 Reconnection and reliability roadmap
+
+## Current status
+
+**Prototype / research stage**
+
+Current implementation:
+
+**Android / Termux RAM buffer → TCP :8081 → USB tethering → Windows client**
+
+The current milestone includes a **512-byte-sector block-device API in user space**.
+
+RAM-Link is currently a prototype—not a native Windows RAM device, not a replacement for physical RAM, and not yet a production-ready storage driver.
+
+## Architecture
+
+```text
+┌──────────────────┐
+│   Android Phone  │
+│   RAM Buffer     │
+│    RAM-Link      │
+└────────┬─────────┘
+         │ USB
+         ▼
+┌──────────────────┐
+│   Windows / PC   │
+│ RAM-Link Client  │
+│ Block Device API │
+└──────────────────┘
+```
+
+Future:
+
+```text
+Android RAM
+    │
+    │ USB / ADB
+    ▼
+RAM-Link Transport
+    │
+    ├── Windows → Dokan / virtual device
+    ├── Linux   → FUSE / NBD
+    └── macOS   → native adapter
+```
 
 ## Quick start
 
-Android / Termux:
+### Android / Termux
 
-    python server.py 512
+```bash
+python server.py 512
+ip addr
+```
 
-Find the USB-tethering IP with `ip addr`, then set HOST in the Windows clients.
+Find the USB-tethering IP and set `HOST` in the Windows client.
 
-Windows:
+### Windows
 
-    python clients/windows/ramlink_client.py
-    python clients/windows/block_device_test.py
+```bash
+python clients/windows/ramlink_client.py
+python clients/windows/block_device_test.py
+```
 
-The block-device test performs sector reads, writes and SHA-256 integrity checks.
+The block-device test performs sector reads, writes, and SHA-256 integrity checks.
+
+## Performance experiments
+
+RAM-Link is being tested over physical USB connections.
+
+Early prototype testing has produced transfer measurements in the **hundreds of MB/s range in controlled tests**. Reproducible benchmark results will be documented as the implementation stabilizes.
+
+## Demo
+
+A short video demonstration will show the Android phone, USB connection, RAM-Link server, PC client, block reads/writes, integrity checks, and performance measurements.
 
 ## Roadmap
 
-- Android RAM buffer
-- RML1 protocol
-- USB tethering transport
-- 512-byte block layer
-- Windows virtual-device adapter
-- Dokan integration
-- Linux FUSE/NBD adapter
-- macOS adapter
-- Reconnection and security
+- [x] Android RAM buffer
+- [x] RML1 protocol
+- [x] USB-tethering transport
+- [x] 512-byte block layer
+- [ ] Reliable USB/ADB transport
+- [ ] Windows virtual-device adapter
+- [ ] Dokan integration
+- [ ] Linux FUSE/NBD adapter
+- [ ] macOS adapter
+- [ ] Automatic reconnection
+- [ ] Authentication and encryption
+- [ ] Benchmark suite
+- [ ] Installer / easy setup
+- [ ] Public release
 
-Do not use this experimental volatile buffer for important data.
+## Search keywords
 
-License: MIT
+**Android RAM over USB · phone RAM for PC · USB RAM · Android memory sharing · RAM over USB · Android PC memory · RAM-backed storage · Android block device · USB memory sharing · Windows virtual storage · Dokan · FUSE · NBD · Kotlin · Android · TCP · ADB**
+
+## Contributing
+
+RAM-Link welcomes testing, benchmarking, bug reports, hardware compatibility reports, and implementation ideas.
+
+## Safety
+
+RAM-Link uses volatile memory. Data can disappear when the phone disconnects, the application stops, the phone restarts, or memory is reclaimed.
+
+**Never use RAM-Link as the only copy of important data.**
+
+## License
+
+MIT
