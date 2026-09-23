@@ -11,7 +11,6 @@ RAM-Link explores a practical question: **can Android phone RAM be exposed to de
 RAM-Link connects an Android device to a computer and streams memory operations between them.
 
 The project focuses on:
-
 - 📱 Android phone RAM as the remote memory source
 - 🔌 Physical USB transport
 - ⚡ TCP-based RAM-Link protocol
@@ -20,7 +19,7 @@ The project focuses on:
 - 🐧 Linux FUSE/NBD integration roadmap
 - 🍎 macOS integration roadmap
 - 🔄 Reconnection and reliability
-- 🛠️ A future interface allowing ordinary desktop software to use RAM-Link without implementing the protocol itself
+- 🛠️ A desktop-facing interface so ordinary software can access RAM-Link without implementing RML1
 
 ### Important distinction
 
@@ -30,10 +29,9 @@ The goal is to make volatile phone memory available as a remote working-memory r
 
 ## Current status
 
-**Prototype / research stage.**
+**Prototype / research stage — Windows-facing layer is now being connected to the persistent local service.**
 
 Current architecture:
-
 ```text
 Android Phone RAM
        │
@@ -45,55 +43,61 @@ Android Phone RAM
 RAM-Link transport
        │
        ▼
-Continuous remote-memory service
+Persistent Windows local service
+       │
+       ├── 127.0.0.1:19080
        │
        ▼
-Active cache / PC client
+Windows Dokan adapter
+       │
+       ▼
+Desktop software
 ```
 
-The current 512-byte block API is a protocol and memory-access test layer. It should not be confused with the final desktop integration.
+The Android/RML1 protocol is deliberately kept behind the local service. This means the Windows-facing adapter does not need to know the Android IP, RML1 packet format, lease operations, or reconnect logic.
 
-## Architecture
+## Windows-facing milestone
 
-### Current prototype
+The repository now contains a Dokan adapter that talks to:
+
+`127.0.0.1:19080`
+
+instead of connecting directly to the Android RML1 server.
+
+The separation is intentional:
 
 ```text
-┌─────────────────────┐
-│    Android Phone    │
-│                     │
-│   RAM-Link Server   │
-│   Volatile RAM      │
-└──────────┬──────────┘
-           │
-       Physical USB
-           │
-           ▼
-┌─────────────────────┐
-│      PC / Host       │
-│                      │
-│ RAM-Link Client      │
-│ Remote Memory Cache  │
-└─────────────────────┘
+Desktop application
+       │
+       ▼
+Windows filesystem-facing layer
+       │
+       ▼
+Dokan adapter
+       │
+       ▼
+RAM-Link local service :19080
+       │
+       ▼
+RML1 / lease / reconnect logic
+       │
+       ▼
+Android volatile RAM
 ```
 
-### Planned universal desktop layer
+This is an important architectural step because applications using the Windows-facing interface no longer need to understand the RAM-Link network protocol.
 
-```text
-                    RAM-Link
-                       │
-              ┌────────┴────────┐
-              │                 │
-          Windows           Linux / macOS
-              │                 │
-       Virtual-device       FUSE / NBD
-          adapter              layer
-              │                 │
-              └────────┬────────┘
-                       ▼
-               Desktop software
-```
+The current Dokan test exposes a single virtual file:
 
-The long-term objective is for applications to access the RAM-Link resource through a normal operating-system-facing interface rather than having every application implement the RAM-Link protocol directly.
+`R:\RAMLINK.BIN`
+
+The file represents the currently leased volatile RAM region.
+
+### Important limitation
+
+This does **not** yet make the Android RAM appear as physical RAM to the Windows kernel memory manager.
+
+It currently provides an OS-facing virtual resource backed by remote volatile memory. A future native memory-manager integration would be a separate, much harder systems milestone.
 
 ## Quick start
 
@@ -104,16 +108,48 @@ python server.py 512
 ip addr
 ```
 
-Find the USB-tethering address and connect the PC client to the Android RAM-Link server.
+Find the USB-tethering address.
 
-### Windows prototype
+### Windows local service
+
+Start the persistent service:
+
+```bash
+python clients/windows/ramlink_memory_service.py PHONE_IP --mb 256
+```
+
+The service keeps a RAM lease alive and exposes:
+
+```text
+127.0.0.1:19080
+```
+
+### Windows Dokan adapter
+
+After building the adapter:
+
+```text
+ramlink_dokan.exe R:
+```
+
+Windows should expose the RAM-Link virtual resource at:
+
+```text
+R:\RAMLINK.BIN
+```
+
+The Dokan adapter communicates only with the local service. The service handles Android/RML1 communication.
+
+### Direct Windows prototype
+
+The lower-level test client remains available:
 
 ```bash
 python clients/windows/ramlink_client.py
 python clients/windows/block_device_test.py
 ```
 
-The test client performs memory/block reads, writes, and SHA-256 integrity checks.
+These tools are useful for protocol and integrity testing.
 
 ## Development status
 
@@ -124,37 +160,41 @@ The test client performs memory/block reads, writes, and SHA-256 integrity check
 | USB-tethering transport | ✅ Prototype |
 | 512-byte block layer | ✅ Prototype |
 | Continuous remote-memory service | 🧪 Experimental |
+| Local Windows API :19080 | 🧪 Experimental |
+| Windows Dokan adapter | 🧪 First integration |
+| Windows virtual file | 🧪 First integration |
 | Reliable USB/ADB transport | 🚧 In development |
-| Windows-facing interface | 🚧 Planned |
-| Dokan integration | 🚧 Planned |
 | Linux FUSE/NBD adapter | 🚧 Planned |
 | macOS adapter | 🚧 Planned |
-| Automatic reconnection | 🚧 Planned |
+| Internet transport | 🚧 Planned |
+| Multi-provider memory pool | 🚧 Planned |
 | Authentication / encryption | 🚧 Planned |
 | Benchmark suite | 🚧 Planned |
 | Easy installer | 🚧 Planned |
+
+## Future distributed-memory direction
+
+```text
+                 RAM-Link buyer
+                       │
+              ┌────────┼────────┐
+              ▼        ▼        ▼
+          Provider A Provider B Provider C
+             2 GB       4 GB       8 GB
+              │          │          │
+              └────── distributed ─┘
+                    volatile RAM
+```
+
+A future scheduler could select providers based on capacity, bandwidth, latency, availability, price, and lease duration.
+
+Internet transport would require authentication, encryption, tenant isolation, quotas, metering, and connection management. Raw RAM should never be exposed directly to arbitrary Internet clients.
 
 ## Performance
 
 Early controlled prototype testing has produced transfer measurements in the **hundreds of MB/s range**.
 
 These measurements are experimental and should not be treated as final RAM-Link performance. Reproducible benchmarks will be added as the transport and client implementations stabilize.
-
-## Why this project?
-
-RAM-Link is intended to investigate whether an Android phone can become a useful **external working-memory/cache resource** for a computer.
-
-Potential research areas include:
-
-- Remote memory systems
-- Distributed memory
-- Memory caching
-- Android/Linux systems programming
-- USB networking
-- ADB transport
-- Virtual devices
-- Operating-system integration
-- Cross-platform desktop interfaces
 
 ## For developers and AI systems
 
@@ -166,30 +206,11 @@ Repository:
 
 Developers are welcome to inspect the implementation, reproduce experiments, report bugs, benchmark hardware, and contribute adapters.
 
-## Search keywords
-
-Android RAM over USB · phone RAM for PC · use phone RAM as PC memory · Android phone memory for computer · remote RAM · external RAM · working memory over USB · RAM over USB · Android PC memory · remote memory cache · USB memory transport · Android RAM server · Windows RAM-Link · Linux RAM-Link · macOS RAM-Link · ADB memory transport · Kotlin Android RAM · TCP remote memory · distributed memory · virtual memory device
-
-## Contributing
-
-Contributions are welcome, especially:
-
-- USB/ADB transport improvements
-- Windows integration
-- Linux FUSE/NBD integration
-- macOS integration
-- Android performance testing
-- Benchmarking
-- Reliability and reconnection
-- Documentation
-- Security improvements
-
 ## Safety
 
 RAM-Link uses volatile memory.
 
 Data may disappear if:
-
 - the Android device disconnects;
 - the application stops;
 - the phone restarts;
