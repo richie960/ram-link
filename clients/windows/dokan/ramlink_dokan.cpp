@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -14,174 +15,156 @@
 
 #pragma comment(lib, "Ws2_32.lib")
 
-static const uint8_t OP_INFO = 1;
-static const uint8_t OP_READ = 2;
-static const uint8_t OP_WRITE = 3;
+// The Dokan layer talks to the persistent local RAM-Link service.
+// Android/RML1 details stay behind ramlink_memory_service.py.
+static const char* LOCAL_HOST = "127.0.0.1";
+static const uint16_t LOCAL_PORT = 19080;
 static const uint32_t MAX_BLOCK = 1024 * 1024;
 static const uint32_t SECTOR_SIZE = 512;
 
-#pragma pack(push, 1)
-struct Header {
-    char magic[4];
-    uint8_t op;
-    uint64_t offset_be;
-    uint32_t length_be;
-};
-#pragma pack(pop)
-
-static uint64_t bswap64(uint64_t x) {
-    return ((x & 0x00000000000000FFULL) << 56) |
-           ((x & 0x000000000000FF00ULL) << 40) |
-           ((x & 0x0000000000FF0000ULL) << 24) |
-           ((x & 0x00000000FF000000ULL) << 8) |
-           ((x & 0x000000FF00000000ULL) >> 8) |
-           ((x & 0x0000FF0000000000ULL) >> 24) |
-           ((x & 0x00FF000000000000ULL) >> 40) |
-           ((x & 0xFF00000000000000ULL) >> 56);
-}
-static uint64_t hton64(uint64_t x) {
-    const uint16_t one = 1;
-    return (*(const uint8_t*)&one) ? bswap64(x) : x;
-}
 static bool send_all(SOCKET s, const void* data, size_t len) {
     const char* p = static_cast<const char*>(data);
     while (len) {
         int n = send(s, p, static_cast<int>(std::min<size_t>(len, 1024 * 1024)), 0);
         if (n <= 0) return false;
-        p += n; len -= static_cast<size_t>(n);
+        p += n;
+        len -= static_cast<size_t>(n);
     }
     return true;
 }
+
 static bool recv_all(SOCKET s, void* data, size_t len) {
     char* p = static_cast<char*>(data);
     while (len) {
         int n = recv(s, p, static_cast<int>(std::min<size_t>(len, 1024 * 1024)), 0);
         if (n <= 0) return false;
-        p += n; len -= static_cast<size_t>(n);
+        p += n;
+        len -= static_cast<size_t>(n);
     }
     return true;
 }
 
-class RamLinkClient {
-public:
-    RamLinkClient(const std::string& host, uint16_t port)
-        : host_(host), port_(port), sock_(INVALID_SOCKET), size_(0) {}
-    ~RamLinkClient() { close_socket(); }
-
-    bool connect_server() {
-        std::lock_guard<std::mutex> guard(mu_);
-        return connect_locked();
+static bool recv_line(SOCKET s, std::string& line) {
+    line.clear();
+    char c = 0;
+    while (line.size() < 8192) {
+        int n = recv(s, &c, 1, 0);
+        if (n <= 0) return false;
+        if (c == '\n') return true;
+        if (c != '\r') line.push_back(c);
     }
-    uint64_t size() const { return size_; }
+    return false;
+}
+
+static SOCKET connect_local() {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* result = nullptr;
+    std::string service = std::to_string(LOCAL_PORT);
+    if (getaddrinfo(LOCAL_HOST, service.c_str(), &hints, &result) != 0)
+        return INVALID_SOCKET;
+
+    SOCKET connected = INVALID_SOCKET;
+    for (addrinfo* p = result; p; p = p->ai_next) {
+        SOCKET s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (s == INVALID_SOCKET) continue;
+
+        DWORD timeout = 60000;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+        if (connect(s, p->ai_addr, static_cast<int>(p->ai_addrlen)) == 0) {
+            connected = s;
+            break;
+        }
+        closesocket(s);
+    }
+    freeaddrinfo(result);
+    return connected;
+}
+
+class LocalRamLinkClient {
+public:
+    uint64_t size() const {
+        std::lock_guard<std::mutex> guard(mu_);
+        SOCKET s = connect_local();
+        if (s == INVALID_SOCKET) return 0;
+
+        const char* command = "SIZE\n";
+        bool ok = send_all(s, command, std::strlen(command));
+        std::string line;
+        if (ok) ok = recv_line(s, line);
+        closesocket(s);
+
+        if (!ok) return 0;
+        try {
+            return std::stoull(line);
+        } catch (...) {
+            return 0;
+        }
+    }
 
     bool read(uint64_t offset, void* out, uint32_t length) {
+        if (length > MAX_BLOCK) return false;
+
         std::lock_guard<std::mutex> guard(mu_);
-        return transact_read_locked(offset, out, length);
+        SOCKET s = connect_local();
+        if (s == INVALID_SOCKET) return false;
+
+        std::string command = "READ " + std::to_string(offset) + " " +
+                              std::to_string(length) + "\n";
+        if (!send_all(s, command.data(), command.size())) {
+            closesocket(s);
+            return false;
+        }
+
+        uint32_t net_length = 0;
+        if (!recv_all(s, &net_length, sizeof(net_length))) {
+            closesocket(s);
+            return false;
+        }
+
+        uint32_t response = ntohl(net_length);
+        bool ok = response == length;
+        if (ok && length) ok = recv_all(s, out, length);
+        closesocket(s);
+        return ok;
     }
+
     bool write(uint64_t offset, const void* data, uint32_t length) {
+        if (length > MAX_BLOCK) return false;
+
         std::lock_guard<std::mutex> guard(mu_);
-        return transact_write_locked(offset, data, length);
+        SOCKET s = connect_local();
+        if (s == INVALID_SOCKET) return false;
+
+        std::string command = "WRITE " + std::to_string(offset) + " " +
+                              std::to_string(length) + "\n";
+        if (!send_all(s, command.data(), command.size())) {
+            closesocket(s);
+            return false;
+        }
+        if (length && !send_all(s, data, length)) {
+            closesocket(s);
+            return false;
+        }
+
+        std::string response;
+        bool ok = recv_line(s, response) && response == "OK";
+        closesocket(s);
+        return ok;
     }
 
 private:
-    std::string host_;
-    uint16_t port_;
-    SOCKET sock_;
-    uint64_t size_;
     mutable std::mutex mu_;
-
-    void close_socket() {
-        if (sock_ != INVALID_SOCKET) {
-            closesocket(sock_);
-            sock_ = INVALID_SOCKET;
-        }
-    }
-    bool connect_locked() {
-        close_socket();
-        addrinfo hints{};
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-        addrinfo* result = nullptr;
-        std::string service = std::to_string(port_);
-        if (getaddrinfo(host_.c_str(), service.c_str(), &hints, &result) != 0) return false;
-
-        for (addrinfo* p = result; p; p = p->ai_next) {
-            SOCKET s = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-            if (s == INVALID_SOCKET) continue;
-            DWORD timeout = 60000;
-            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-            if (connect(s, p->ai_addr, static_cast<int>(p->ai_addrlen)) == 0) {
-                sock_ = s;
-                freeaddrinfo(result);
-                return query_info_locked();
-            }
-            closesocket(s);
-        }
-        freeaddrinfo(result);
-        return false;
-    }
-    bool send_header_locked(uint8_t op, uint64_t offset, uint32_t length) {
-        Header h{};
-        std::memcpy(h.magic, "RML1", 4);
-        h.op = op;
-        h.offset_be = hton64(offset);
-        h.length_be = htonl(length);
-        return send_all(sock_, &h, sizeof(h));
-    }
-    bool recv_header_locked(Header& h) {
-        if (!recv_all(sock_, &h, sizeof(h))) return false;
-        return std::memcmp(h.magic, "RML1", 4) == 0;
-    }
-    bool query_info_locked() {
-        if (!send_header_locked(OP_INFO, 0, 0)) return false;
-        Header h{};
-        if (!recv_header_locked(h)) return false;
-        uint32_t n = ntohl(h.length_be);
-        if (n > 64 * 1024) return false;
-        std::vector<char> text(n + 1);
-        if (!recv_all(sock_, text.data(), n)) return false;
-        text[n] = 0;
-        std::string s(text.data());
-        const std::string key = "buffer_bytes=";
-        size_t pos = s.find(key);
-        if (pos == std::string::npos) return false;
-        pos += key.size();
-        size_t end = s.find('\n', pos);
-        try {
-            size_ = std::stoull(s.substr(pos, end == std::string::npos ? std::string::npos : end - pos));
-        } catch (...) {
-            return false;
-        }
-        return size_ >= SECTOR_SIZE;
-    }
-    bool transact_read_locked(uint64_t offset, void* out, uint32_t length) {
-        if (offset > size_ || length > size_ - offset) return false;
-        if (length == 0) return true;
-        if (sock_ == INVALID_SOCKET && !connect_locked()) return false;
-        if (!send_header_locked(OP_READ, offset, length)) return false;
-
-        Header h{};
-        if (!recv_header_locked(h)) return false;
-        uint32_t response = ntohl(h.length_be);
-        if (h.op != OP_READ || response != length) return false;
-        return recv_all(sock_, out, length);
-    }
-    bool transact_write_locked(uint64_t offset, const void* data, uint32_t length) {
-        if (offset > size_ || length > size_ - offset) return false;
-        if (length == 0) return true;
-        if (sock_ == INVALID_SOCKET && !connect_locked()) return false;
-        if (!send_header_locked(OP_WRITE, offset, length)) return false;
-        if (!send_all(sock_, data, length)) return false;
-
-        Header h{};
-        if (!recv_header_locked(h)) return false;
-        return h.op == OP_WRITE && ntohl(h.length_be) == length;
-    }
 };
 
-static RamLinkClient* g_client = nullptr;
+static LocalRamLinkClient* g_client = nullptr;
 static const wchar_t* RAM_FILE = L"\\RAMLINK.BIN";
 
 static bool is_root(LPCWSTR name) {
@@ -227,9 +210,11 @@ static NTSTATUS DOKAN_CALLBACK rl_read(
         return STATUS_OBJECT_NAME_NOT_FOUND;
 
     uint64_t off = static_cast<uint64_t>(Offset);
-    if (off >= g_client->size()) return STATUS_SUCCESS;
+    uint64_t total64 = g_client->size();
+    if (off >= total64) return STATUS_SUCCESS;
+
     uint32_t total = static_cast<uint32_t>(
-        std::min<uint64_t>(BufferLength, g_client->size() - off));
+        std::min<uint64_t>(BufferLength, total64 - off));
 
     uint8_t* p = static_cast<uint8_t*>(Buffer);
     uint32_t done = 0;
@@ -251,8 +236,8 @@ static NTSTATUS DOKAN_CALLBACK rl_write(
         return STATUS_OBJECT_NAME_NOT_FOUND;
 
     uint64_t off = static_cast<uint64_t>(Offset);
-    if (off > g_client->size() ||
-        NumberOfBytesToWrite > g_client->size() - off)
+    uint64_t total64 = g_client->size();
+    if (off > total64 || NumberOfBytesToWrite > total64 - off)
         return STATUS_DISK_FULL;
 
     const uint8_t* p = static_cast<const uint8_t*>(Buffer);
@@ -278,7 +263,9 @@ static NTSTATUS DOKAN_CALLBACK rl_info(
         return STATUS_SUCCESS;
     }
     if (is_ram_file(FileName) && g_client) {
-        fill_file_info(Buffer, g_client->size(), false);
+        uint64_t n = g_client->size();
+        if (!n) return STATUS_DEVICE_NOT_CONNECTED;
+        fill_file_info(Buffer, n, false);
         return STATUS_SUCCESS;
     }
     return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -379,20 +366,14 @@ static DOKAN_OPERATIONS make_ops() {
 }
 
 int wmain(int argc, wchar_t* argv[]) {
-    std::string host = "192.168.42.129";
     wchar_t mount[8] = L"R:\\";
     if (argc >= 2) {
-        char tmp[256]{};
-        WideCharToMultiByte(CP_UTF8, 0, argv[1], -1, tmp, sizeof(tmp), nullptr, nullptr);
-        host = tmp;
-    }
-    if (argc >= 3) {
-        if (wcslen(argv[2]) == 1) {
-            mount[0] = argv[2][0]; mount[1] = L':'; mount[2] = L'\\'; mount[3] = 0;
-        } else if (wcslen(argv[2]) == 2 && argv[2][1] == L':') {
-            mount[0] = argv[2][0]; mount[1] = L':'; mount[2] = L'\\'; mount[3] = 0;
+        if (wcslen(argv[1]) == 1) {
+            mount[0] = argv[1][0]; mount[1] = L':'; mount[2] = L'\\'; mount[3] = 0;
+        } else if (wcslen(argv[1]) == 2 && argv[1][1] == L':') {
+            mount[0] = argv[1][0]; mount[1] = L':'; mount[2] = L'\\'; mount[3] = 0;
         } else {
-            wcscpy_s(mount, argv[2]);
+            wcscpy_s(mount, argv[1]);
         }
     }
 
@@ -402,16 +383,19 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    RamLinkClient client(host, 8081);
+    LocalRamLinkClient client;
     g_client = &client;
-    std::cout << "Connecting to RAM-Link server " << host << ":8081...\n";
-    if (!client.connect_server()) {
-        std::cerr << "RAM-Link connection failed. Check USB tethering/IP/server.\n";
+
+    uint64_t n = client.size();
+    if (!n) {
+        std::cerr << "RAM-Link local service is not available on 127.0.0.1:19080.\n";
+        std::cerr << "Start ramlink_memory_service.py first.\n";
         WSACleanup();
         return 2;
     }
 
-    std::cout << "Remote RAM buffer: " << (client.size() / 1024 / 1024) << " MiB\n";
+    std::cout << "RAM-Link local service connected. Remote RAM: "
+              << (n / 1024 / 1024) << " MiB\n";
 
     DOKAN_OPTIONS opt{};
     opt.Version = DOKAN_VERSION;
