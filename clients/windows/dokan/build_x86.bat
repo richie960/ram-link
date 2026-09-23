@@ -22,8 +22,14 @@ if errorlevel 1 (
   exit /b 3
 )
 echo BUILD OK: ramlink_dokan.exe
-echo Usage:
-echo   ramlink_dokan.exe PHONE_USB_TETHER_IP R:
-echo Example:
-echo   ramlink_dokan.exe 192.168.42.129 R:
+echo.
+echo The Dokan adapter now talks to the local RAM-Link service:
+echo   127.0.0.1:19080
+echo.
+echo Start the Python service first, for example:
+echo   python ramlink_memory_service.py PHONE_IP --mb 256
+echo.
+echo Then mount:
+echo   ramlink_dokan.exe R:
+echo.
 pause
