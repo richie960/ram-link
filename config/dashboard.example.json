@@ -1,0 +1,19 @@
+{
+  "poll_seconds": 5,
+  "nodes": [
+    {
+      "name": "Android / Termux node",
+      "host": "127.0.0.1",
+      "port": 18080,
+      "token_file": "../token.txt"
+    },
+    {
+      "name": "Laptop node (example)",
+      "host": "192.168.1.50",
+      "port": 18080,
+      "token_file": "../laptop-token.txt",
+      "ca_file": "../certs/ramlink-ca.pem",
+      "server_name": "laptop.local"
+    }
+  ]
+}
