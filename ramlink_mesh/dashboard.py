@@ -174,7 +174,6 @@ def make_handler(config: dict[str, Any], config_path: Path):
                 return
             if route == "/api/status":
                 try:
-                    nodes = asyncio.run(asyncio.gather(*[])) if False else None
                     async def collect():
                         return await asyncio.gather(*(poll_node(node) for node in config["nodes"]))
                     data_obj = {"timestamp": time.time(), "nodes": asyncio.run(collect())}
