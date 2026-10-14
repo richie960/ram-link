@@ -39,9 +39,29 @@ python -m ramlink_mesh.agent stats 127.0.0.1 --port 18080 --token-file token.txt
 cmp sample.bin restored.bin
 ```
 
+## Live dashboard (new)
+
+The dashboard is a local, read-only web page that polls the configured peers every five seconds. It shows online/offline status, configured RAMLink pool capacity, used/available bytes, object count, request count, uptime and transferred bytes.
+
+1. Create a token as above, and start a local node in another Termux session if you want a real local peer.
+2. Copy `config/dashboard.example.json` to `config/dashboard.json`.
+3. Edit `config/dashboard.json`. For the local node, use host `127.0.0.1`, port `18080`, and token file `../token.txt`. Remove the laptop example until you have configured a trusted TLS certificate and matching CA file.
+4. Start the dashboard from the repository root:
+
+```bash
+python -m ramlink_mesh.dashboard --config config/dashboard.json --port 8765
+```
+
+5. Open `http://127.0.0.1:8765` in the browser on the same device. On Android, Termux and the browser run on the same phone, so localhost is appropriate.
+6. Stop the dashboard with Ctrl+C in the Termux session.
+
+The dashboard itself intentionally binds only to loopback. You can monitor peers on a LAN or across the internet **only when each remote peer has a properly configured TLS endpoint and its CA/name configured in the dashboard JSON**. For viewing the dashboard from another device, use a trusted VPN or SSH tunnel; do not expose its HTTP port publicly. The dashboard never displays tokens.
+
+The values labelled “pool” refer only to RAMLink's explicitly allocated object buffers, not total system RAM, and not guaranteed memory available to another process.
+
 ## Two-node test
 
-Install/run this branch on two trusted machines. Configure the receiving node with a TLS certificate and key, bind to a private interface, and open the port only on the trusted LAN. On the client, provide the certificate authority with `--ca ca.pem` and the matching DNS name with `--server-name node.example`. Keep the same secret token on both sides. Do not use `--ca` omission for untrusted networks; without a CA, the client does not verify server identity.
+Install/run this branch on two trusted machines. Configure the receiving node with a TLS certificate and key, bind to a private interface, and open the port only on the trusted LAN. On the client, provide the certificate authority with `--ca ca.pem` and the matching DNS name with `--server-name node.example`. Keep the same secret token on both sides. Do not omit `--ca` for untrusted networks; without a CA, the client does not verify server identity.
 
 The same process can both serve and consume resources: run `serve` on each node and use `put/get/list/stats` against any peer. A future scheduler can register these endpoints and select peers automatically.
 
@@ -49,6 +69,7 @@ The same process can both serve and consume resources: run `serve` on each node 
 
 ```bash
 python -m unittest discover -s tests -v
+python -m ramlink_mesh.dashboard --help
 ```
 
 ## Next engineering steps
