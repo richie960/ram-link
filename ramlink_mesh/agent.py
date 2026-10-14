@@ -163,9 +163,11 @@ class MeshServer:
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         authenticated = False
+        current_request_id = 0
         try:
             while True:
                 msg_type, request_id, payload = await read_frame(reader)
+                current_request_id = request_id
                 if not authenticated:
                     if msg_type != AUTH or not __import__("hmac").compare_digest(payload, self.token):
                         writer.write(pack_frame(ERROR, request_id, b"authentication failed"))
@@ -209,7 +211,7 @@ class MeshServer:
             pass
         except (ProtocolError, ValueError, KeyError, CapacityError, TypeError) as exc:
             try:
-                writer.write(pack_frame(ERROR, 0, str(exc).encode("utf-8")[:2048]))
+                writer.write(pack_frame(ERROR, current_request_id, str(exc).encode("utf-8")[:2048]))
                 await writer.drain()
             except (ConnectionError, OSError):
                 pass
