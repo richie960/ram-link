@@ -9,6 +9,18 @@ RAM-Link is an experimental remote-memory system using the RML1 protocol.
 - Leases, keepalive, release, bounded transfers and integrity tests are supported.
 - TCP 18080 can run over USB tethering or a private LAN/Wi-Fi network.
 
+## Security and memory safety
+
+RAM-Link treats network peers and all incoming protocol fields as untrusted. The
+design requirements for bounded allocations, explicit buffer lifetimes, lease
+validation, peer isolation, race-safe cleanup, integrity checks, resource quotas,
+and safe transport are documented in
+[`docs/SECURITY_MEMORY_SAFETY.md`](docs/SECURITY_MEMORY_SAFETY.md).
+
+That document describes required controls and tests; it does not claim that every
+control has already been implemented or audited. Keep RAM-Link experimental until
+the implementation and tests demonstrate the relevant guarantees.
+
 ## PC provides RAM to Android
 
 Windows:
